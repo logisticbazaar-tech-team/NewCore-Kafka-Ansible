@@ -1,0 +1,29 @@
+---
+- name: Update Kafka one broker at a time
+  hosts: kafka_brokers
+  become: true
+  serial: 1
+  pre_tasks:
+    - name: Require a healthy metadata quorum before changing a broker
+      ansible.builtin.command:
+        cmd: >-
+          /opt/kafka/bin/kafka-metadata-quorum.sh
+          --bootstrap-controller {{ groups['kafka_brokers'][0] }}:9094
+          --command-config /etc/kafka/admin.properties describe --status
+      delegate_to: "{{ groups['kafka_brokers'][0] }}"
+      changed_when: false
+  roles:
+    - role: kafka
+  post_tasks:
+    - name: Wait for metadata quorum recovery
+      ansible.builtin.command:
+        cmd: >-
+          /opt/kafka/bin/kafka-metadata-quorum.sh
+          --bootstrap-controller {{ groups['kafka_brokers'][0] }}:9094
+          --command-config /etc/kafka/admin.properties describe --status
+      delegate_to: "{{ groups['kafka_brokers'][0] }}"
+      register: kafka_rolling_quorum
+      changed_when: false
+      retries: 30
+      delay: 10
+      until: kafka_rolling_quorum.rc == 0

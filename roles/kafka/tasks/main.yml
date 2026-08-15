@@ -1,0 +1,143 @@
+---
+- name: Gather mounted filesystems
+  ansible.builtin.command:
+    cmd: "findmnt --noheadings --output TARGET --target {{ kafka_data_dir }}"
+  register: kafka_mount
+  changed_when: false
+  failed_when: false
+
+- name: Validate Kafka safety inputs
+  ansible.builtin.assert:
+    that:
+      - groups['kafka_brokers'] | length >= 3
+      - groups['kafka_brokers'] | length % 2 == 1
+      - kafka_cluster_id | length >= 16
+      - kafka_mount.rc == 0
+      - kafka_mount.stdout | trim == kafka_data_dir
+      - kafka_min_insync_replicas | int < kafka_default_replication_factor | int
+    fail_msg: Kafka requires an odd quorum, a stable cluster ID, and a dedicated pre-mounted data filesystem.
+
+- name: Install runtime packages
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - openjdk-21-jre-headless
+    state: present
+    update_cache: true
+
+- name: Verify Kafka archive on the controller
+  ansible.builtin.command:
+    cmd: "sha512sum --check --strict kafka_{{ kafka_scala_version }}-{{ kafka_version }}.tgz.sha512"
+    chdir: "{{ kafka_artifacts_dir }}"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  changed_when: false
+
+- name: Create Kafka system account
+  ansible.builtin.user:
+    name: kafka
+    system: true
+    home: /var/lib/kafka
+    shell: /usr/sbin/nologin
+
+- name: Install Kafka release
+  ansible.builtin.unarchive:
+    src: "{{ kafka_artifacts_dir }}/kafka_{{ kafka_scala_version }}-{{ kafka_version }}.tgz"
+    dest: /opt
+    owner: root
+    group: root
+    creates: "/opt/kafka_{{ kafka_scala_version }}-{{ kafka_version }}/bin/kafka-server-start.sh"
+
+- name: Point stable path at installed release
+  ansible.builtin.file:
+    src: "/opt/kafka_{{ kafka_scala_version }}-{{ kafka_version }}"
+    dest: /opt/kafka
+    state: link
+    force: true
+  notify: Restart Kafka
+
+- name: Create Kafka configuration directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: kafka
+    group: kafka
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: /etc/kafka, mode: "0750" }
+    - { path: /etc/kafka/tls, mode: "0750" }
+    - { path: "{{ kafka_log_dir }}", mode: "0750" }
+
+- name: Preserve ownership of the pre-mounted data directory
+  ansible.builtin.file:
+    path: "{{ kafka_data_dir }}"
+    state: directory
+    owner: kafka
+    group: kafka
+    mode: "0750"
+
+- name: Install Kafka TLS material
+  ansible.builtin.copy:
+    src: "{{ kafka_tls_source_dir }}/{{ item }}"
+    dest: "/etc/kafka/tls/{{ item }}"
+    owner: kafka
+    group: kafka
+    mode: "{{ '0600' if item == 'tls.key' else '0644' }}"
+  loop:
+    - ca.crt
+    - tls.crt
+    - tls.key
+  no_log: true
+  notify: Restart Kafka
+
+- name: Render Kafka broker configuration
+  ansible.builtin.template:
+    src: server.properties.j2
+    dest: /etc/kafka/server.properties
+    owner: kafka
+    group: kafka
+    mode: "0600"
+  notify: Restart Kafka
+
+- name: Render local administrator TLS configuration
+  ansible.builtin.copy:
+    dest: /etc/kafka/admin.properties
+    owner: kafka
+    group: kafka
+    mode: "0600"
+    content: |
+      security.protocol=SSL
+      ssl.keystore.type=PEM
+      ssl.keystore.certificate.chain=/etc/kafka/tls/tls.crt
+      ssl.keystore.key=/etc/kafka/tls/tls.key
+      ssl.truststore.type=PEM
+      ssl.truststore.certificates=/etc/kafka/tls/ca.crt
+
+- name: Initialize KRaft metadata only when absent
+  ansible.builtin.command:
+    cmd: /opt/kafka/bin/kafka-storage.sh format --cluster-id {{ kafka_cluster_id | quote }} --config /etc/kafka/server.properties
+  become: true
+  become_user: kafka
+  args:
+    creates: "{{ kafka_data_dir }}/meta.properties"
+
+- name: Install Kafka systemd unit
+  ansible.builtin.template:
+    src: kafka.service.j2
+    dest: /etc/systemd/system/kafka.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart Kafka
+
+- name: Apply Kafka configuration changes
+  ansible.builtin.meta: flush_handlers
+
+- name: Ensure Kafka is enabled and running
+  ansible.builtin.systemd_service:
+    name: kafka
+    enabled: true
+    state: started

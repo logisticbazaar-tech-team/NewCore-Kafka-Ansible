@@ -1,0 +1,13 @@
+---
+kafka_version: 4.3.1
+kafka_scala_version: "2.13"
+kafka_artifacts_dir: "{{ inventory_dir }}/../../artifacts/{{ kafka_version }}"
+kafka_cluster_id: "{{ lookup('ansible.builtin.env', 'KAFKA_CLUSTER_ID') }}"
+kafka_data_dir: /srv/kafka/data
+kafka_log_dir: /var/log/kafka
+kafka_heap_opts: -Xms2G -Xmx2G
+kafka_tls_source_dir: "{{ inventory_dir }}/../../private/{{ inventory_hostname }}"
+kafka_super_users:
+  - User:platform-admin
+kafka_default_replication_factor: 3
+kafka_min_insync_replicas: 2

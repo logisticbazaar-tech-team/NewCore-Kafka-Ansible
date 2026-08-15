@@ -1,0 +1,23 @@
+---
+- name: Configure Kafka brokers
+  hosts: kafka_brokers
+  become: true
+  serial: 1
+  roles:
+    - role: kafka
+
+- name: Validate Kafka quorum
+  hosts: kafka_brokers[0]
+  become: true
+  tasks:
+    - name: Wait for quorum status
+      ansible.builtin.command:
+        cmd: >-
+          /opt/kafka/bin/kafka-metadata-quorum.sh
+          --bootstrap-controller {{ inventory_hostname }}:9094
+          --command-config /etc/kafka/admin.properties describe --status
+      register: kafka_quorum
+      changed_when: false
+      retries: 30
+      delay: 10
+      until: kafka_quorum.rc == 0
